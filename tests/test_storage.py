@@ -15,13 +15,19 @@ from easyathome_bbt_daemon.storage import (
     get_reading_corrections,
     get_reading_exclusion_history,
     get_reading_time_corrections,
+    get_report,
+    get_report_history,
     list_context_entries,
     list_readings,
+    list_reports_for_profile,
     record_ble_reading,
     record_manual_reading,
+    record_report,
     resolve_naive_local_time,
     reverse_context_entry_exclusion,
     reverse_reading_exclusion,
+    supersede_report,
+    update_report_status,
     upsert_context_entry,
 )
 
@@ -564,3 +570,166 @@ def test_exclude_context_entry_unknown_date(tmp_path):
         assert False, "expected StorageError"
     except StorageError:
         pass
+
+
+# --- reports: immutable revisions ---------------------------------------------
+
+
+def _record_kwargs(**overrides):
+    kwargs = dict(
+        mode="chart_only",
+        assigned_profile="alice",
+        range_start="2026-07-01",
+        range_end="2026-07-24",
+        generation_params={"profile": "alice", "mode": "chart_only"},
+        generated_tz="America/New_York",
+        covered_reading_ids=[],
+        status="pending",
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_record_report_creates_revision_1(tmp_path):
+    db_path = _db(tmp_path)
+    report_id = record_report(db_path, **_record_kwargs(covered_reading_ids=[1, 2, 3]))
+    report = get_report(db_path, report_id)
+    assert report["revision"] == 1
+    assert report["status"] == "pending"
+    assert report["mode"] == "chart_only"
+    assert report["covered_reading_ids"] == [1, 2, 3]
+    assert report["supersedes"] is None
+    assert report["superseded_by"] is None
+
+
+def test_record_report_rejects_invalid_status(tmp_path):
+    db_path = _db(tmp_path)
+    try:
+        record_report(db_path, **_record_kwargs(status="bogus"))
+        assert False, "expected StorageError"
+    except StorageError:
+        pass
+
+
+def test_update_report_status_pending_to_ready(tmp_path):
+    db_path = _db(tmp_path)
+    report_id = record_report(db_path, **_record_kwargs())
+    update_report_status(
+        db_path, report_id, "ready", content_digest="abc123", file_path="/tmp/x.pdf"
+    )
+    report = get_report(db_path, report_id)
+    assert report["status"] == "ready"
+    assert report["content_digest"] == "abc123"
+    assert report["file_path"] == "/tmp/x.pdf"
+
+
+def test_update_report_status_unknown_id(tmp_path):
+    db_path = _db(tmp_path)
+    try:
+        update_report_status(db_path, 9999, "ready")
+        assert False, "expected StorageError"
+    except StorageError:
+        pass
+
+
+def test_superseding_new_revision_shares_report_uid_and_increments(tmp_path):
+    db_path = _db(tmp_path)
+    first_id = record_report(db_path, **_record_kwargs(status="ready"))
+    first = get_report(db_path, first_id)
+
+    second_id = record_report(
+        db_path, **_record_kwargs(status="ready", supersedes=first_id)
+    )
+    second = get_report(db_path, second_id)
+
+    assert second["report_uid"] == first["report_uid"]
+    assert second["revision"] == 2
+    assert second["supersedes"] == first_id
+
+
+def test_supersede_report_never_touches_old_revisions_own_facts(tmp_path):
+    db_path = _db(tmp_path)
+    first_id = record_report(db_path, **_record_kwargs(status="pending"))
+    update_report_status(
+        db_path, first_id, "ready", content_digest="digest-1", file_path="/tmp/v1.pdf"
+    )
+    first_before = get_report(db_path, first_id)
+
+    second_id = record_report(
+        db_path, **_record_kwargs(status="pending", supersedes=first_id)
+    )
+    update_report_status(
+        db_path, second_id, "ready", content_digest="digest-2", file_path="/tmp/v2.pdf"
+    )
+    supersede_report(db_path, first_id, second_id)
+
+    first_after = get_report(db_path, first_id)
+    # The old revision's own generation facts are untouched...
+    assert first_after["content_digest"] == first_before["content_digest"] == "digest-1"
+    assert first_after["file_path"] == first_before["file_path"] == "/tmp/v1.pdf"
+    assert first_after["generated_at"] == first_before["generated_at"]
+    # ...only its status and forward-pointer change.
+    assert first_after["status"] == "superseded"
+    assert first_after["superseded_by"] == second_id
+
+
+def test_supersede_report_unknown_old_id(tmp_path):
+    db_path = _db(tmp_path)
+    new_id = record_report(db_path, **_record_kwargs(status="ready"))
+    try:
+        supersede_report(db_path, 9999, new_id)
+        assert False, "expected StorageError"
+    except StorageError:
+        pass
+
+
+def test_record_report_supersedes_unknown_id(tmp_path):
+    db_path = _db(tmp_path)
+    try:
+        record_report(db_path, **_record_kwargs(supersedes=9999))
+        assert False, "expected StorageError"
+    except StorageError:
+        pass
+
+
+def test_list_reports_for_profile_ordering_and_filtering(tmp_path):
+    db_path = _db(tmp_path)
+    first_id = record_report(
+        db_path, **_record_kwargs(status="ready", generated_at="2026-07-01T00:00:00+00:00")
+    )
+    second_id = record_report(
+        db_path,
+        **_record_kwargs(
+            status="ready", supersedes=first_id, generated_at="2026-07-02T00:00:00+00:00"
+        ),
+    )
+    supersede_report(db_path, first_id, second_id)
+
+    all_reports = list_reports_for_profile(db_path, "alice")
+    assert [r["id"] for r in all_reports] == [second_id, first_id]  # most recent first
+
+    active_only = list_reports_for_profile(db_path, "alice", include_superseded=False)
+    assert [r["id"] for r in active_only] == [second_id]
+
+    assert list_reports_for_profile(db_path, "someone-else") == []
+
+
+def test_get_report_history_returns_all_revisions_oldest_first(tmp_path):
+    db_path = _db(tmp_path)
+    first_id = record_report(db_path, **_record_kwargs(status="ready"))
+    second_id = record_report(
+        db_path, **_record_kwargs(status="ready", supersedes=first_id)
+    )
+    third_id = record_report(
+        db_path, **_record_kwargs(status="ready", supersedes=second_id)
+    )
+
+    report_uid = get_report(db_path, third_id)["report_uid"]
+    history = get_report_history(db_path, report_uid)
+    assert [r["id"] for r in history] == [first_id, second_id, third_id]
+    assert [r["revision"] for r in history] == [1, 2, 3]
+
+
+def test_get_report_unknown_id_returns_none(tmp_path):
+    db_path = _db(tmp_path)
+    assert get_report(db_path, 9999) is None
