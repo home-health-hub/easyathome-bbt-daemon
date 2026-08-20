@@ -1,0 +1,47 @@
+name: Bug report
+description: Report a problem with easyathome-bbt-daemon
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Daemon version
+      placeholder: "easyathome-bbt-daemon --version"
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "python3 --version"
+    validations:
+      required: true
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Do you have real EBT-300 hardware, or is this about the code itself?
+      options:
+        - Real EBT-300 hardware
+        - Code/tests only, no hardware
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include full error output/traceback and relevant `journalctl -u easyathome-bbt-daemon` lines if any.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Config file contents (redacted), OS, Bluetooth adapter, etc.
