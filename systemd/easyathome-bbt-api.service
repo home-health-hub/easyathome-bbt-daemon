@@ -1,0 +1,14 @@
+[Unit]
+Description=Easy@Home BBT daemon HTTP API (health / capabilities)
+After=easyathome-bbt-daemon.service
+
+[Service]
+Type=simple
+User=easyathome-bbt-daemon
+Group=easyathome-bbt-daemon
+ExecStart=/usr/bin/easyathome-bbt-api --config /etc/easyathome-bbt-daemon/config.ini
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

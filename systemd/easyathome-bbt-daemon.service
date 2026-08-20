@@ -1,0 +1,18 @@
+[Unit]
+Description=Easy@Home EBT-300 basal body temperature BLE collection daemon
+After=bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+User=easyathome-bbt-daemon
+Group=easyathome-bbt-daemon
+SupplementaryGroups=bluetooth
+ExecStart=/usr/bin/easyathome-bbt-daemon --config /etc/easyathome-bbt-daemon/config.ini
+Restart=on-failure
+RestartSec=5
+StateDirectory=easyathome-bbt-daemon
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

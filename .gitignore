@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.flake8_cache/
+
+# Live config seeded from config/easyathome-bbt-daemon.ini.example
+config/easyathome-bbt-daemon.ini
+
+# Local SQLite database and logs produced by running the daemon
+*.db
+*.db-journal
+*.log

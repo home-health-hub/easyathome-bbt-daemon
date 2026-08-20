@@ -1,0 +1,39 @@
+[daemon]
+# The EBT-300's BLE address (e.g. AA:BB:CC:DD:EE:FF). Required -- unlike
+# some sibling daemons, easyathome-ble exposes no discover() helper of its
+# own, so this daemon cannot auto-discover the device. Find it by hand
+# (e.g. via bluetoothctl or nRF Connect) before starting the service.
+address =
+
+# IANA timezone name (e.g. America/New_York) used to resolve the device's
+# naive local timestamps into absolute instants. Required. Keep this in
+# sync with the host machine's own timezone: easyathome-ble writes the
+# host's current local time to the device on every connection, so a
+# mismatch here would misinterpret the device's own clock.
+device_timezone =
+
+# Seconds to wait before retrying after a failed scan/connect attempt.
+retry_seconds = 30
+
+# Logging level: DEBUG, INFO, WARNING, ERROR
+log_level = INFO
+
+[storage]
+# Path to the SQLite database file where readings and context entries are
+# recorded.
+db_path = /var/lib/easyathome-bbt-daemon/bbt.db
+
+[api]
+# Lightweight local HTTP API (easyathome-bbt-api): GET /api/v1/health and
+# GET /api/v1/capabilities only in this release. Defaults to no.
+enabled = no
+
+# Bind address. Change to 0.0.0.0 (or a specific interface) only if you
+# understand the exposure -- set token below if you do.
+host = 127.0.0.1
+port = 8081
+
+# Optional bearer token. Neither endpoint in this release requires
+# authentication regardless of this setting -- reserved for a later phase
+# once endpoints exposing actual reading data are added.
+token =
