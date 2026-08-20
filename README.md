@@ -208,6 +208,9 @@ exits. Exit code is `1` if nothing was received in that window.
 
 ## Report generation
 
+A sample generated report: [samples/sample-report.pdf](samples/sample-report.pdf)
+(synthetic fixture data, not a real reading history).
+
 `easyathome-bbt-report` renders a chart-only BBT PDF report (addendum
 section 9) for one profile: a single-cycle temperature chart with aligned
 menstrual-flow/cervical-mucus/LH/disturbance tracks (addendum 7.1/8.1),
