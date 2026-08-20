@@ -81,6 +81,70 @@ feature (addendum section 9.3: reports must be reproducible from retained
 inputs) -- reproducing an old report needs the audit trail, not just
 today's cached value.
 
+## Why the `reports` table is immutable revisions, not cached rows
+
+Addendum section 9.3 requires that "each generated PDF is an immutable
+revision" and that regenerating a report from changed inputs produces a
+*new* revision rather than silently replacing the old document. `reports`
+implements this with a shape that looks superficially like the
+correction/exclusion audit tables but is subtly different in what "the
+row" means:
+
+- For `reading_corrections`/`reading_exclusions`, the audit table is the
+  history and `readings` holds a *cache* of the current value -- the cache
+  gets overwritten in place on every correction (see the section above),
+  because there's exactly one "current" reading value at a time.
+- For `reports`, there is no separate cache/history split. Every row *is*
+  a complete, self-contained revision -- its own `generated_at`,
+  `content_digest`, `file_path`, and `generation_params` are never
+  rewritten once set. "Regenerating a report" doesn't update a row; it
+  inserts a new one via `record_report(..., supersedes=<old id>)`, which
+  reuses the old row's `report_uid` (the stable identity of the *logical*
+  report across revisions) and increments `revision`.
+
+The one thing that *does* get updated in place is `supersede_report`
+flipping the old row's `status` to `"superseded"` and setting its
+`superseded_by` pointer -- but this only ever touches those two columns,
+never the old row's own generation facts. `test_supersede_report_never_touches_old_revisions_own_facts`
+in `tests/test_storage.py` asserts exactly this: the old PDF's digest,
+file path, and generation timestamp survive supersession untouched, the
+same guarantee `correct_reading` gives `readings.original_value`.
+
+Two status transitions happen instead of one insert-and-done, mirroring a
+real generation attempt's lifecycle: `record_report` first inserts the row
+as `"pending"` (addendum section 10's status vocabulary), then
+`update_report_status` flips it to `"ready"` (with digest and file path)
+or `"failed"` once `report.py`'s `build_pdf` call actually finishes or
+raises. This means a crash mid-render leaves a `"pending"` row behind
+rather than either a phantom `"ready"` row with no file, or nothing at
+all -- see `generate_report`'s `try`/`except` in `report.py`.
+
+`report_covered_readings` is a join table, not a serialized ID list column,
+so "which reports cover reading N" is a normal indexed query rather than a
+scan-and-parse -- the addendum leaves this choice open ("a serialized list
+or join table -- your call"), and a join table costs nothing extra here
+since SQLite handles the extra table for free at this data scale.
+
+## Why the chart's context tracks are plain text rows this phase, not a graphical symptothermal chart
+
+Addendum section 8.2 describes a fuller symptothermal chart with aligned
+graphical tracks (mucus symbols, flow intensity bars, etc.) and explicitly
+allows the underlying method's overlays (coverline, shift marker) to be
+layered on *when a named interpretation method is selected* -- none of
+which exists yet (chart-only mode has no method to select, per section
+7.1). `chart.py`'s `_add_context_tracks` renders the required tracks
+(menstrual flow, cervical mucus, LH test, disturbances, cycle day, plus a
+calendar-date row) as plain aligned text/one-letter-code rows with an
+explicit, data-driven legend -- satisfying section 8.1's minimum ("aligned
+context tracks below the temperature plot") and section 8.2's
+accessibility requirement (no color-only encoding), without building the
+richer graphical rendering section 8.2 sketches. Building that richer view
+is explicitly listed as a later phase in the addendum's section 14
+sequencing (chart-only and symptothermal dashboards are the same numbered
+step, but nothing here blocks doing the graphical version later against
+the same `ChartData`/`build_chart_data` data shape -- only `render_chart`
+would need to change).
+
 ## Why identity/dedup doesn't use the BLE address alone
 
 Addendum section 4.2 explicitly warns against treating a BLE address as a

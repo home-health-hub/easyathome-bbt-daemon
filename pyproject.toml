@@ -13,6 +13,7 @@ dependencies = [
     "easyathome-ble>=0.2.4",
     "bleak>=2.1.1,<4.0.0",
     "aiohttp>=3.9.0,<4.0.0",
+    "reportlab>=4.0.0,<5.0.0",
 ]
 
 [project.urls]
@@ -21,6 +22,7 @@ Homepage = "https://github.com/home-health-hub/easyathome-bbt-daemon"
 [project.scripts]
 easyathome-bbt-daemon = "easyathome_bbt_daemon.cli:main"
 easyathome-bbt-api = "easyathome_bbt_daemon.api:main"
+easyathome-bbt-report = "easyathome_bbt_daemon.report:main"
 
 [project.optional-dependencies]
 dev = [

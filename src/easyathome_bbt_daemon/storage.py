@@ -26,11 +26,20 @@ module:
   don't need a correlated subquery -- that cache is always derived from,
   and kept in sync with, the audit table. The audit table is the source of
   truth; the cached column is a read optimization.
+
+The ``reports`` table (addendum section 9.3) follows a related but distinct
+pattern: each row *is* an immutable revision, not a cache of one. Superseding
+a report never deletes or rewrites an old row's own generation facts
+(``generated_at``, ``content_digest``, ``file_path``, ...) -- ``supersede_report``
+only ever adds a forward-pointing ``superseded_by`` link and flips ``status``
+to ``"superseded"`` on the old row, exactly as a new correction never touches
+a reading's ``original_value``. See ``CLAUDE.md`` for the full reasoning.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -149,7 +158,35 @@ CREATE TABLE IF NOT EXISTS context_entry_exclusions (
     actor TEXT NOT NULL,
     occurred_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_uid TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    assigned_profile TEXT,
+    range_start TEXT,
+    range_end TEXT,
+    generation_params TEXT,
+    generated_at TEXT NOT NULL,
+    generated_tz TEXT NOT NULL,
+    content_digest TEXT,
+    file_path TEXT,
+    supersedes INTEGER REFERENCES reports(id),
+    superseded_by INTEGER REFERENCES reports(id),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS report_covered_readings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL REFERENCES reports(id),
+    reading_id INTEGER NOT NULL REFERENCES readings(id)
+);
 """
+
+#: Valid values for reports.status, per addendum section 10.
+REPORT_STATUSES = ("pending", "ready", "failed", "superseded")
 
 #: Editable context-entry columns, i.e. everything except the primary key,
 #: the unique entry_date, and the bookkeeping/audit-cache columns that have
@@ -1074,5 +1111,288 @@ def get_context_entry_exclusion_history(
             (row[0],),
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        connection.close()
+
+
+def get_device(db_path: str, device_id: int) -> dict[str, object] | None:
+    """Fetch one device row by its daemon-owned id, for report provenance summaries."""
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        row = connection.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        connection.close()
+
+
+def record_report(
+    db_path: str,
+    *,
+    mode: str,
+    assigned_profile: str | None,
+    range_start: str,
+    range_end: str,
+    generation_params: dict[str, object],
+    generated_tz: str,
+    covered_reading_ids: list[int],
+    status: str = "pending",
+    generated_at: str | None = None,
+    supersedes: int | None = None,
+) -> int:
+    """Insert a new, immutable report revision row.
+
+    Per addendum 9.3, each generated PDF is its own revision -- this never
+    overwrites a prior report row. ``report_uid`` identifies the *logical*
+    report across its revisions: a fresh one is minted unless ``supersedes``
+    names an earlier revision, in which case this row inherits that row's
+    ``report_uid`` and takes the next ``revision`` number. The row starts in
+    whatever ``status`` the caller passes (normally ``"pending"``, updated
+    to ``"ready"``/``"failed"`` via ``update_report_status`` once PDF
+    rendering finishes) -- see ``report.py``'s ``generate_report`` for the
+    full lifecycle, including when ``supersede_report`` is called to mark
+    the prior revision superseded.
+
+    Args:
+        db_path: Filesystem path to the SQLite database file.
+        mode: Interpretation mode used, always ``"chart_only"`` this phase.
+        assigned_profile: The profile this report covers, if any.
+        range_start: Covered period's first date (``YYYY-MM-DD``).
+        range_end: Covered period's last date (``YYYY-MM-DD``).
+        generation_params: Arbitrary JSON-serializable dict of the inputs
+            used to generate this report (profile, date range, mode, CLI
+            version, ...), stored verbatim for later reproduction/audit.
+        generated_tz: Timezone name used to display generation time on the
+            rendered report.
+        covered_reading_ids: Reading ids included in this report, recorded
+            in ``report_covered_readings`` for addendum 9.3 reproducibility.
+        status: Initial status; one of ``REPORT_STATUSES``.
+        generated_at: ISO-8601 instant the report was generated; defaults
+            to now (UTC).
+        supersedes: The report id this revision replaces, if any.
+
+    Returns:
+        The new report row's primary key.
+
+    Raises:
+        StorageError: If ``status`` is invalid or ``supersedes`` names an
+            unknown report.
+    """
+    if status not in REPORT_STATUSES:
+        raise StorageError(f"Invalid report status {status!r}; must be one of {REPORT_STATUSES}")
+
+    now = _utc_now_iso()
+    when_generated = generated_at or now
+
+    connection = sqlite3.connect(db_path)
+    try:
+        if supersedes is not None:
+            prior = connection.execute(
+                "SELECT report_uid, revision FROM reports WHERE id = ?", (supersedes,)
+            ).fetchone()
+            if prior is None:
+                raise StorageError(f"No report with id {supersedes}")
+            report_uid, revision = prior[0], prior[1] + 1
+        else:
+            report_uid, revision = str(uuid.uuid4()), 1
+
+        cursor = connection.execute(
+            """
+            INSERT INTO reports (
+                report_uid, revision, status, mode, assigned_profile, range_start,
+                range_end, generation_params, generated_at, generated_tz,
+                content_digest, file_path, supersedes, superseded_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?)
+            """,
+            (
+                report_uid,
+                revision,
+                status,
+                mode,
+                assigned_profile,
+                range_start,
+                range_end,
+                json.dumps(generation_params),
+                when_generated,
+                generated_tz,
+                supersedes,
+                now,
+            ),
+        )
+        report_id = cursor.lastrowid
+
+        connection.executemany(
+            "INSERT INTO report_covered_readings (report_id, reading_id) VALUES (?, ?)",
+            [(report_id, reading_id) for reading_id in covered_reading_ids],
+        )
+        connection.commit()
+        return report_id
+    finally:
+        connection.close()
+
+
+def update_report_status(
+    db_path: str,
+    report_id: int,
+    status: str,
+    *,
+    content_digest: str | None = None,
+    file_path: str | None = None,
+) -> None:
+    """Transition a report row's own generation attempt to a terminal state.
+
+    This updates the row in place, but only ever the row's *own* in-flight
+    generation attempt (``"pending"`` -> ``"ready"``/``"failed"``) -- it is
+    not a way to rewrite a previously ``"ready"`` report. A change to
+    underlying data after that point must go through ``record_report`` with
+    ``supersedes`` set, producing a new revision rather than mutating this
+    one (addendum 9.3).
+
+    Args:
+        db_path: Filesystem path to the SQLite database file.
+        report_id: The report row to update.
+        status: New status; one of ``REPORT_STATUSES``.
+        content_digest: SHA-256 hex digest of the rendered PDF bytes, set
+            when ``status == "ready"``.
+        file_path: Filesystem path of the rendered PDF, set when
+            ``status == "ready"``.
+
+    Raises:
+        StorageError: If ``status`` is invalid or no report matches
+            ``report_id``.
+    """
+    if status not in REPORT_STATUSES:
+        raise StorageError(f"Invalid report status {status!r}; must be one of {REPORT_STATUSES}")
+
+    connection = sqlite3.connect(db_path)
+    try:
+        exists = connection.execute(
+            "SELECT 1 FROM reports WHERE id = ?", (report_id,)
+        ).fetchone()
+        if exists is None:
+            raise StorageError(f"No report with id {report_id}")
+
+        connection.execute(
+            "UPDATE reports SET status = ?, content_digest = ?, file_path = ? WHERE id = ?",
+            (status, content_digest, file_path, report_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def supersede_report(db_path: str, old_report_id: int, new_report_id: int) -> None:
+    """Mark ``old_report_id`` as superseded by ``new_report_id``.
+
+    Called once the new revision has actually reached ``"ready"`` -- not at
+    the moment a new revision is merely requested -- so a failed
+    regeneration attempt never strands the still-valid prior report in a
+    superseded state with nothing to replace it.
+
+    Args:
+        db_path: Filesystem path to the SQLite database file.
+        old_report_id: The previously current report revision.
+        new_report_id: The revision that now supersedes it.
+
+    Raises:
+        StorageError: If ``old_report_id`` doesn't exist.
+    """
+    connection = sqlite3.connect(db_path)
+    try:
+        exists = connection.execute(
+            "SELECT 1 FROM reports WHERE id = ?", (old_report_id,)
+        ).fetchone()
+        if exists is None:
+            raise StorageError(f"No report with id {old_report_id}")
+
+        connection.execute(
+            "UPDATE reports SET status = 'superseded', superseded_by = ? WHERE id = ?",
+            (new_report_id, old_report_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _row_to_report_dict(connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, object]:
+    """Convert a ``reports`` row into a dict, attaching its covered reading ids."""
+    report = dict(row)
+    covered = connection.execute(
+        "SELECT reading_id FROM report_covered_readings WHERE report_id = ? ORDER BY reading_id",
+        (report["id"],),
+    ).fetchall()
+    report["covered_reading_ids"] = [r[0] for r in covered]
+    return report
+
+
+def get_report(db_path: str, report_id: int) -> dict[str, object] | None:
+    """Fetch one report revision by id, including its covered reading ids.
+
+    Args:
+        db_path: Filesystem path to the SQLite database file.
+        report_id: The report row's primary key.
+
+    Returns:
+        A dict of every column plus ``covered_reading_ids``, or None if no
+        row matches.
+    """
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        row = connection.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+        return _row_to_report_dict(connection, row) if row is not None else None
+    finally:
+        connection.close()
+
+
+def list_reports_for_profile(
+    db_path: str, assigned_profile: str | None, *, include_superseded: bool = True
+) -> list[dict[str, object]]:
+    """List report revisions for a profile, most recently generated first.
+
+    Args:
+        db_path: Filesystem path to the SQLite database file.
+        assigned_profile: The profile to list reports for (matches
+            ``reports.assigned_profile`` exactly, including None).
+        include_superseded: If False, omit rows whose status is
+            ``"superseded"``.
+
+    Returns:
+        One dict per matching report revision, each including
+        ``covered_reading_ids``.
+    """
+    query = "SELECT * FROM reports WHERE assigned_profile IS ?"
+    params: list[object] = [assigned_profile]
+    if not include_superseded:
+        query += " AND status != 'superseded'"
+    query += " ORDER BY generated_at DESC"
+
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(query, params).fetchall()
+        return [_row_to_report_dict(connection, row) for row in rows]
+    finally:
+        connection.close()
+
+
+def get_report_history(db_path: str, report_uid: str) -> list[dict[str, object]]:
+    """Return every revision of one logical report, oldest first.
+
+    Args:
+        db_path: Filesystem path to the SQLite database file.
+        report_uid: The stable identifier shared by every revision of one
+            logical report (see ``record_report``).
+
+    Returns:
+        One dict per revision, each including ``covered_reading_ids``.
+    """
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            "SELECT * FROM reports WHERE report_uid = ? ORDER BY revision ASC", (report_uid,)
+        ).fetchall()
+        return [_row_to_report_dict(connection, row) for row in rows]
     finally:
         connection.close()

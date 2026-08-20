@@ -38,6 +38,15 @@ async def handle_capabilities(request: web.Request) -> web.Response:
     ``hardware_verified`` is ``false`` because this daemon's BLE collection
     path has never run against a real EBT-300 (see the README warning
     banner and ``CLAUDE.md``).
+
+    ``dashboards`` and ``report_generation`` are ``true`` as of this phase:
+    ``chart.py`` renders the chart-only single-cycle view (addendum 7.1/8.1)
+    and ``report.py`` generates immutable chart-only PDFs (addendum 9). Both
+    are CLI-driven (``easyathome-bbt-report``), not HTTP-triggered -- the
+    Hub-facing report-initiation/status/download API from addendum section
+    10 is still a later phase, mirroring how the sibling
+    ``health-thermometer-daemon`` keeps PDF generation CLI/cron-driven
+    rather than API-triggered.
     """
     return web.json_response(
         {
@@ -47,12 +56,17 @@ async def handle_capabilities(request: web.Request) -> web.Response:
             "interpretation_modes": ["chart_only"],
             "manual_entry": True,
             "assignment": True,
+            "dashboards": True,
+            "report_generation": True,
+            "report_generation_trigger": "cli",
             "hardware_verified": False,
             "notes": (
-                "Collection and persistence only in this release. The BBT "
-                "context-entry web UI, dashboards, PDF reports, and the "
-                "Sensiplan/SymptoPro/TCOYF interpretation engines are not "
-                "implemented yet -- see docs/HEALTH_HUB_BBT_DAEMON_ADDENDUM.md."
+                "Collection, persistence, chart-only dashboards, and chart-only PDF "
+                "reporting (CLI-driven via easyathome-bbt-report) are implemented. The "
+                "BBT context-entry web UI/form and the Sensiplan/SymptoPro/TCOYF "
+                "interpretation engines are not implemented yet, nor is the Hub-facing "
+                "report-initiation/status/download HTTP API -- see "
+                "docs/HEALTH_HUB_BBT_DAEMON_ADDENDUM.md."
             ),
         }
     )
